@@ -81,7 +81,7 @@ void ls (char *input)
 
         while ((entry = readdir(dp)) != NULL) // 문서 끝 도달 전까지
         {
-            if (entry->d_name != '.') // 숨김 파일 출력 x
+            if ((entry->d_name) != ".") // 숨김 파일 출력 x
             {
                 printf("%s\n", entry->d_name);
             }
