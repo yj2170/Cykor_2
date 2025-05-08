@@ -34,11 +34,10 @@ void print_prompt();
 void ls();
 void cd_cmd(char *input);
 void pwd();
+void trim(char **str);
 void process_line(char *line);
 int parsing(char *input, ParsedCmd cmds[]);
 void executing_cmd(char *cmd);
-// int strip_background_flag(char *cmd);
-// int split_pipes(char *seq, char *pipes[]);
 void execute_pipeline(char *cmds[], int n, int background);
 
 char *cwd = NULL;
@@ -85,12 +84,63 @@ int main ()
     return 0;
 }
 
+
+void trim(char **str)
+{
+
+    if (*str == NULL || **str == '\0') return;
+
+    // 앞쪽 공백 제거
+    while(**str == ' ') (*str)++;
+
+    // 뒷쪽 공백 제거
+    char *end = *str + strlen(*str) - 1;
+    while (end > *str && *end == ' ')
+    {
+        *end = '\0';
+        end--;
+    }
+}
+
+
 // executing cmd
 void executing_cmd (char *cmd)
 {
     if (strncmp(cmd, "cd", 2) == 0) cd_cmd(cmd);
     else if (strncmp(cmd, "pwd", 3) == 0) pwd();
     else if (strncmp(cmd, "ls", 2) == 0) ls();
+    else
+    {
+        // 외부 명령일 경우
+        pid_t pid = fork();
+        if (pid < 0)
+        {
+            perror("fork");
+            return;
+        }
+        else if (pid == 0)
+        {
+            // child
+            char *argv[MAX_ARGS];
+            int argc = 0;
+            char *token = strtok(cmd, " ");
+            while (token != NULL && argc < MAX_ARGS - 1)
+            {
+                argv[argc++] = token;
+                token = strtok(NULL, " ");
+            }
+            argv[argc] = NULL;
+
+            execvp(argv[0], argv);
+            perror("execvp failed");
+            exit(1);
+        }
+        else
+        {
+            // parent
+            waitpid(pid, NULL, 0);
+        }
+    }
 }
 
 
@@ -104,38 +154,54 @@ void process_line (char *input) {
     {
         if (cmds[i].type == CMD_SIMPLE)
         {
-            if (strstr(cmds[i].cmd, '&') == NULL)
+            if (strrchr(cmds[i].cmd, '&') == NULL)
             {
-                // BG 아닐 경우
+                // not BG
                 executing_cmd(cmds[i].cmd);
             }
             else
             {
-                // BG 실행
+                // BG
                 pid_t pid = fork();
 
-                if (pid < 0) {
+                if (pid < 0)
+                {
                     perror("fork failed");
-                } else if (pid == 0) {
-                    // 자식 프로세스: 명령 실행
-                    cmds[i].cmd[strlen(cmds[i].cmd) - 1] = '\0'; // '&' 제거
-                    execlp(cmds[i].cmd, cmds[i].cmd, (char *) NULL);
+                }
+                else if (pid == 0)
+                {
+                    // child
+                    char *amp = strrchr(cmds[i].cmd, '&');
+                    *amp = '\0'; // & 제거
+                    trim(&cmds[i].cmd);
+                    
+                    char *argv[MAX_ARGS];
+                    int argc = 0;
+                    char *token = strtok(cmds[i].cmd, " ");
+                    while (token != NULL && argc < MAX_ARGS - 1)
+                    {
+                        argv[argc++] = token;
+                        token = strtok(NULL, " ");
+                    }
+                    argv[argc] = NULL;
+
+                    execvp(argv[0], argv);
                     perror("exec failed");
                     exit(1);
-                } else {
-                    // 부모 프로세스: 그냥 계속 실행
+                }
+                else
+                {
+                    // parent
                     printf("Started process %d in background\n", pid);
                 }
             }
         }
         else if (cmds[i].type == CMD_AND) // 마지막 명령어는 무조건 type = CMD_SIMPLE 이므로 다른 type에서는 무조건 다음 cmd가 존재함
         {
-
+            //
         }
-
-        i++;
+        i++;       
     }
-
 }
 
 
@@ -144,34 +210,51 @@ int parsing (char *input, ParsedCmd cmds[])
 {
     int count = 0;
     char *p = input;
+    trim(&p);
 
     while (*p && count < MAX_SEQ)
     {
         char *op = strpbrk(p, "&|;");
-        if (!op || (op[0] == '&' && op[1] != '&')) cmds[count++] = (ParsedCmd){ .cmd = p, .type = CMD_SIMPLE };
 
-        // defining cmd type
+        if (!op)
+        {
+            cmds[count++] = (ParsedCmd){ .cmd = p, .type = CMD_SIMPLE };
+            break;
+        }
+
+        // check cmd type
         CmdType type;
         if (op[0] == '&' && op[1] == '&') type = CMD_AND;
         else if (op[0] == '|' && op[1] == '|') type = CMD_OR;
         else if (op[0] == '|') type = CMD_PIPE;
-        else type = CMD_SEQ;
+        else if (op[0] == ';') type = CMD_SEQ;
+        else {
+            // BG
+            cmds[count++] = (ParsedCmd){ .cmd = p, .type = CMD_SIMPLE };
+            break;
+        }
 
-        // cut and save
-        *op = '\0';
-        cmds[count++] = (ParsedCmd){ .cmd = p, .type = type };
-
-        // next token
         p = op + ((type == CMD_AND || type == CMD_OR) ? 2 : 1);
-        while (*p == ' ') p++; // trim
+        trim(&p);
+
+        // 연산자 명시적 저장 (cmd=NULL일 수도 있음)
+        cmds[count++] = (ParsedCmd){ .cmd = p, .type = type };
     }
-    
     return count;
 }
 
 
 void print_prompt ()
-{ // 색 추가, 호스트명 크기, 메모리 해제 전 검증
+{
+    // cwd 유효성 검사
+    if (cwd == NULL) {
+        cwd = getcwd(NULL, 0);
+        if (cwd == NULL) {
+            perror("getcwd");
+            printf("unknown$ ");
+            return;
+        }
+    }
 
     // 유저명 받기
     char *username = getenv("USER");
@@ -205,6 +288,7 @@ void ls ()
     if (dp == NULL)
     { // 실패 시 에러 출력
         perror("opendir");
+        return;
     }
 
     while ((entry = readdir(dp)) != NULL) // 문서 끝 도달 전까지
@@ -220,13 +304,17 @@ void ls ()
 }
 
 
+// 성공하면 0 반환
 void cd_cmd (char *input)
 {
+    char *cmd = input + 2;
+    trim(&cmd);
+    while(*cmd == ' ') cmd++;
     char path[PATH_MAX];
     char *home_dir = getenv("HOME");
 
     // cd 일 경우
-    if (strlen(input) == 0)
+    if (*cmd == '\0')
     {
         if(home_dir == NULL)
         {
@@ -234,11 +322,11 @@ void cd_cmd (char *input)
             return;
         }
 
-        input = home_dir;
+        cmd = home_dir;
     }
 
     // ~ 처리
-    if (input[0] == '~')
+    if (cmd[0] == '~')
     {
         if (home_dir == NULL)
         {
@@ -246,13 +334,13 @@ void cd_cmd (char *input)
             return;
         }
 
-        if (input[1] == '\0')
+        if (cmd[1] == '\0')
         {
             snprintf(path, sizeof(path), "%s", home_dir);
         }
-        else if (input[1] == '/')
+        else if (cmd[1] == '/')
         {
-            snprintf(path, sizeof(path), "%s%s", home_dir, input + 1);
+            snprintf(path, sizeof(path), "%s%s", home_dir, cmd + 1);
         }
         else
         {
@@ -260,23 +348,25 @@ void cd_cmd (char *input)
             return;
         }
 
-        input = path;
+        cmd = path;
     }
 
     // 디렉토리 변경
-    if (chdir(input) != 0)
+    if (chdir(cmd) != 0)
     {
         perror("cd");
         return;
     }
 
     // cwd 갱신
-    free(cwd);
-    cwd = getcwd(NULL, 0);
-    if (cwd == NULL)
+    char *new_cwd = getcwd(NULL, 0);
+    if (new_cwd == NULL)
     {
         perror("getcwd");
+        return;
     }
+    free(cwd);
+    cwd = new_cwd;
 }
 
 
