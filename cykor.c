@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/wait.h>
+#define STDIN_FILENO 0
+#define STDOUT_FILENO 1
 
 #define PATH_MAX 4096
 #define MAX_SEQ 16
@@ -31,13 +33,13 @@ typedef struct
 
 int main();
 void print_prompt();
-void ls();
-void cd_cmd(char *input);
-void pwd();
+int ls();
+int cd_cmd(char *input);
+int pwd();
 void trim(char **str);
 void process_line(char *line);
 int parsing(char *input, ParsedCmd cmds[]);
-void executing_cmd(char *cmd);
+int executing_cmd(char *cmd);
 void execute_pipeline(char *cmds[], int n, int background);
 
 char *cwd = NULL;
@@ -104,11 +106,11 @@ void trim(char **str)
 
 
 // executing cmd
-void executing_cmd (char *cmd)
+int executing_cmd (char *cmd)
 {
-    if (strncmp(cmd, "cd", 2) == 0) cd_cmd(cmd);
-    else if (strncmp(cmd, "pwd", 3) == 0) pwd();
-    else if (strncmp(cmd, "ls", 2) == 0) ls();
+    if (strncmp(cmd, "cd", 2) == 0) return cd_cmd(cmd);
+    else if (strncmp(cmd, "pwd", 3) == 0) return pwd();
+    else if (strncmp(cmd, "ls", 2) == 0) return ls();
     else
     {
         // 외부 명령일 경우
@@ -116,7 +118,7 @@ void executing_cmd (char *cmd)
         if (pid < 0)
         {
             perror("fork");
-            return;
+            return 1;
         }
         else if (pid == 0)
         {
@@ -134,11 +136,13 @@ void executing_cmd (char *cmd)
             execvp(argv[0], argv);
             perror("execvp failed");
             exit(1);
+            return 0;
         }
         else
         {
             // parent
             waitpid(pid, NULL, 0);
+            return 0;
         }
     }
 }
@@ -152,61 +156,144 @@ void process_line (char *input) {
 
     while (i < seq_cnt)
     {
-        if (cmds[i].type == CMD_SIMPLE)
+        ParsedCmd current = cmds[i];
+        int status = 0;
+
+        // BG 
+        int is_bg = 0;
+        char *amp = strrchr(current.cmd, '&');
+        if (amp && *(amp + 1) == '\0')
         {
-            if (strrchr(cmds[i].cmd, '&') == NULL)
+            is_bg = 1;
+            *amp = '\0';
+            trim(&current.cmd);
+        }
+
+        if (i > 0)
+        {
+            CmdType prev_type = cmds[i - 1].type;
+            if ((prev_type == CMD_AND && status != 0) || (prev_type == CMD_OR && status == 0))
             {
-                // not BG
-                executing_cmd(cmds[i].cmd);
+                i++;
+                continue;
+            }
+        }
+
+        if (current.type == CMD_PIPE)
+        {
+            int j = i;
+            char *pipe_cmds[MAX_PIPE];
+            int pipe_cnt = 0;
+
+            pipe_cmds[pipe_cnt++] = cmds[j].cmd;
+
+            while (cmds[j + 1].type == CMD_PIPE)
+            {
+                j++;
+                pipe_cmds[pipe_cnt++] = cmds[j].cmd;
+            }
+
+            execute_pipeline(pipe_cmds, pipe_cnt, 0);
+
+            i = j;
+            status = 0;
+        }
+        else if (is_bg) // case of bg
+        {
+            pid_t pid = fork();
+            if (pid == 0)
+            {
+                // child
+                char *argv[MAX_ARGS];
+                int argc = 0;
+                char *token = strtok(current.cmd, " ");
+                while (token != NULL && argc < MAX_ARGS - 1)
+                {
+                    argv[argc++] = token;
+                    token = strtok(NULL, " ");
+                }
+                argv[argc] = NULL;
+                execvp(argv[0], argv);
+                perror("exec failed");
+                exit(1);
             }
             else
             {
-                // BG
-                pid_t pid = fork();
-
-                if (pid < 0)
-                {
-                    perror("fork failed");
-                }
-                else if (pid == 0)
-                {
-                    // child
-                    char *amp = strrchr(cmds[i].cmd, '&');
-                    *amp = '\0'; // & 제거
-                    trim(&cmds[i].cmd);
-                    
-                    char *argv[MAX_ARGS];
-                    int argc = 0;
-                    char *token = strtok(cmds[i].cmd, " ");
-                    while (token != NULL && argc < MAX_ARGS - 1)
-                    {
-                        argv[argc++] = token;
-                        token = strtok(NULL, " ");
-                    }
-                    argv[argc] = NULL;
-
-                    execvp(argv[0], argv);
-                    perror("exec failed");
-                    exit(1);
-                }
-                else
-                {
-                    // parent
-                    printf("Started process %d in background\n", pid);
-                }
+                printf("Started process %d in background\n", pid);
+                status = 0;
             }
         }
-        else if (cmds[i].type == CMD_AND) // 마지막 명령어는 무조건 type = CMD_SIMPLE 이므로 다른 type에서는 무조건 다음 cmd가 존재함
+        else // 일반
         {
-            //
+            status = executing_cmd(current.cmd);
         }
+
+
         i++;       
     }
 }
 
+void execute_pipeline(char *cmds[], int n, int background) {
+    int pipefd[2], prev_fd = -1;
+    pid_t pids[MAX_PIPE];
+
+    for (int i = 0; i < n; i++) {
+        if (i < n - 1 && pipe(pipefd) < 0) {
+            perror("pipe");
+            exit(1);
+        }
+
+        pid_t pid = fork();
+        if (pid == 0) {
+            if (prev_fd != -1) {
+                dup2(prev_fd, STDIN_FILENO);
+                close(prev_fd);
+            }
+            if (i < n - 1) {
+                close(pipefd[0]);
+                dup2(pipefd[1], STDOUT_FILENO);
+                close(pipefd[1]);
+            }
+
+            for (int j = 0; j < i; j++) close(pipefd[j]);
+
+            char *argv[MAX_ARGS];
+            int argc = 0;
+            char *token = strtok(cmds[i], " ");
+            while (token && argc < MAX_ARGS - 1) {
+                argv[argc++] = token;
+                token = strtok(NULL, " ");
+            }
+            argv[argc] = NULL;
+
+            execvp(argv[0], argv);
+            perror("exec failed");
+            exit(1);
+        } else if (pid > 0) {
+            pids[i] = pid;
+            if (prev_fd != -1) close(prev_fd);
+            if (i < n - 1) {
+                close(pipefd[1]);
+                prev_fd = pipefd[0];
+            }
+        } else {
+            perror("fork");
+            exit(1);
+        }
+    }
+
+    if (!background) {
+        for (int i = 0; i < n; i++) {
+            waitpid(pids[i], NULL, 0);
+        }
+    }
+
+    if (prev_fd != -1) close(prev_fd);
+}
+
 
 // cmd parsing
-int parsing (char *input, ParsedCmd cmds[])
+int parsing(char *input, ParsedCmd cmds[])
 {
     int count = 0;
     char *p = input;
@@ -216,30 +303,50 @@ int parsing (char *input, ParsedCmd cmds[])
     {
         char *op = strpbrk(p, "&|;");
 
+        // nontype
         if (!op)
         {
             cmds[count++] = (ParsedCmd){ .cmd = p, .type = CMD_SIMPLE };
             break;
         }
 
-        // check cmd type
-        CmdType type;
-        if (op[0] == '&' && op[1] == '&') type = CMD_AND;
-        else if (op[0] == '|' && op[1] == '|') type = CMD_OR;
-        else if (op[0] == '|') type = CMD_PIPE;
-        else if (op[0] == ';') type = CMD_SEQ;
-        else {
-            // BG
-            cmds[count++] = (ParsedCmd){ .cmd = p, .type = CMD_SIMPLE };
-            break;
+        char *end = op;
+        *end = '\0';
+        trim(&p);
+        cmds[count].cmd = p;
+
+        // check type
+        CmdType next_type;
+        if (op[0] == '&' && op[1] == '&')
+        {
+            next_type = CMD_AND;
+            p = op + 2;
+        }
+        else if (op[0] == '|' && op[1] == '|')
+        {
+            next_type = CMD_OR;
+            p = op + 2;
+        }
+        else if (op[0] == '|')
+        {
+            next_type = CMD_PIPE;
+            p = op + 1;
+        }
+        else if (op[0] == ';')
+        {
+            next_type = CMD_SEQ;
+            p = op + 1;
+        }
+        else
+        {
+            next_type = CMD_SIMPLE; // bg
+            p = op + 1;
         }
 
-        p = op + ((type == CMD_AND || type == CMD_OR) ? 2 : 1);
         trim(&p);
-
-        // 연산자 명시적 저장 (cmd=NULL일 수도 있음)
-        cmds[count++] = (ParsedCmd){ .cmd = p, .type = type };
+        cmds[count++].type = next_type;
     }
+
     return count;
 }
 
@@ -280,7 +387,7 @@ void print_prompt ()
 }
 
 
-void ls ()
+int ls ()
 { // 알파벳 정렬
     struct dirent *entry;
     DIR *dp = opendir("."); // 현재 디렉토리 오픈
@@ -288,7 +395,7 @@ void ls ()
     if (dp == NULL)
     { // 실패 시 에러 출력
         perror("opendir");
-        return;
+        return 1;
     }
 
     while ((entry = readdir(dp)) != NULL) // 문서 끝 도달 전까지
@@ -301,11 +408,12 @@ void ls ()
     }
 
     closedir(dp);
+    return 0;
 }
 
 
 // 성공하면 0 반환
-void cd_cmd (char *input)
+int cd_cmd (char *input)
 {
     char *cmd = input + 2;
     trim(&cmd);
@@ -319,7 +427,7 @@ void cd_cmd (char *input)
         if(home_dir == NULL)
         {
             fprintf(stderr, "cd: HOME not set\n");
-            return;
+            return 1;
         }
 
         cmd = home_dir;
@@ -331,7 +439,7 @@ void cd_cmd (char *input)
         if (home_dir == NULL)
         {
             fprintf(stderr, "cd: HOME not set\n");
-            return;
+            return 1;
         }
 
         if (cmd[1] == '\0')
@@ -345,7 +453,7 @@ void cd_cmd (char *input)
         else
         {
             fprintf(stderr, "cd: unsupported ~ syntax\n");
-            return;
+            return 1;
         }
 
         cmd = path;
@@ -355,7 +463,7 @@ void cd_cmd (char *input)
     if (chdir(cmd) != 0)
     {
         perror("cd");
-        return;
+        return 1;
     }
 
     // cwd 갱신
@@ -363,14 +471,16 @@ void cd_cmd (char *input)
     if (new_cwd == NULL)
     {
         perror("getcwd");
-        return;
+        return 1;
     }
     free(cwd);
     cwd = new_cwd;
+    return 0;
 }
 
 
-void pwd ()
+int pwd ()
 {
     printf("%s\n", cwd);
+    return 0;
 }
