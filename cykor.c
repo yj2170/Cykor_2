@@ -21,7 +21,6 @@ typedef enum
     CMD_AND,   // &&
     CMD_OR,    // ||
     CMD_PIPE,  // |
-    // CMD_BG     // &
 } CmdType;
 
 typedef struct
@@ -39,10 +38,12 @@ int pwd();
 void trim(char **str);
 void process_line(char *line);
 int parsing(char *input, ParsedCmd cmds[]);
-int executing_cmd(char *cmd);
+int execute_cmd(char *cmd);
 void execute_pipeline(char *cmds[], int n, int background);
 
 char *cwd = NULL;
+int seq_cnt;
+ParsedCmd cmds[MAX_SEQ];
 
 int main () 
 {
@@ -79,9 +80,15 @@ int main ()
         }
 
         process_line(input);
+
+        for (int i = 0; i < seq_cnt; i++) {
+            free(cmds[i].cmd);  // strdup() 된 문자열을 해제
+            cmds[i].cmd = NULL; // 포인터 초기화
+        }
     }
 
     free(input);
+    free(cwd);
 
     return 0;
 }
@@ -89,7 +96,6 @@ int main ()
 
 void trim(char **str)
 {
-
     if (*str == NULL || **str == '\0') return;
 
     // 앞쪽 공백 제거
@@ -106,7 +112,7 @@ void trim(char **str)
 
 
 // executing cmd
-int executing_cmd (char *cmd)
+int execute_cmd (char *cmd)
 {
     if (strncmp(cmd, "cd", 2) == 0) return cd_cmd(cmd);
     else if (strncmp(cmd, "pwd", 3) == 0) return pwd();
@@ -150,8 +156,7 @@ int executing_cmd (char *cmd)
 
 // 전체 process
 void process_line (char *input) {
-    ParsedCmd cmds[MAX_SEQ];
-    int seq_cnt = parsing(input, cmds); // parsing cmds
+    seq_cnt = parsing(input, cmds); // parsing cmds
     int i = 0;
 
     while (i < seq_cnt)
@@ -169,6 +174,7 @@ void process_line (char *input) {
             trim(&current.cmd);
         }
 
+        // and or 처리
         if (i > 0)
         {
             CmdType prev_type = cmds[i - 1].type;
@@ -179,15 +185,16 @@ void process_line (char *input) {
             }
         }
 
+        // pipe 명령 수 세고 execute_pipeline 호출
         if (current.type == CMD_PIPE)
         {
             int j = i;
             char *pipe_cmds[MAX_PIPE];
             int pipe_cnt = 0;
 
-            pipe_cmds[pipe_cnt++] = cmds[j].cmd;
+            pipe_cmds[pipe_cnt++] = current.cmd;
 
-            while (cmds[j + 1].type == CMD_PIPE)
+            while (cmds[j].type == CMD_PIPE)
             {
                 j++;
                 pipe_cmds[pipe_cnt++] = cmds[j].cmd;
@@ -195,8 +202,9 @@ void process_line (char *input) {
 
             execute_pipeline(pipe_cmds, pipe_cnt, 0);
 
-            i = j;
+            i = j + 1;
             status = 0;
+            continue;
         }
         else if (is_bg) // case of bg
         {
@@ -225,70 +233,87 @@ void process_line (char *input) {
         }
         else // 일반
         {
-            status = executing_cmd(current.cmd);
+            status = execute_cmd(current.cmd);
         }
 
-
-        i++;       
+        i++;
     }
 }
 
+
 void execute_pipeline(char *cmds[], int n, int background) {
-    int pipefd[2], prev_fd = -1;
+    int pipes[MAX_PIPE][2];
     pid_t pids[MAX_PIPE];
 
-    for (int i = 0; i < n; i++) {
-        if (i < n - 1 && pipe(pipefd) < 0) {
+    // 파이프 준비
+    for (int i = 0; i < n - 1; i++) {
+        if (pipe(pipes[i]) < 0) {
             perror("pipe");
             exit(1);
         }
+    }
 
+    for (int i = 0; i < n; i++) {
         pid_t pid = fork();
         if (pid == 0) {
-            if (prev_fd != -1) {
-                dup2(prev_fd, STDIN_FILENO);
-                close(prev_fd);
+            // 자식 프로세스
+            
+            // 표준 입력
+            if (i > 0) {
+                dup2(pipes[i - 1][0], STDIN_FILENO); // 입력값을 이전 출력값으로 연결
             }
+
+            // 표준 출력
             if (i < n - 1) {
-                close(pipefd[0]);
-                dup2(pipefd[1], STDOUT_FILENO);
-                close(pipefd[1]);
+                dup2(pipes[i][1], STDOUT_FILENO); // 출력값을 다음 입력값으로 연결
             }
 
-            for (int j = 0; j < i; j++) close(pipefd[j]);
-
-            char *argv[MAX_ARGS];
-            int argc = 0;
-            char *token = strtok(cmds[i], " ");
-            while (token && argc < MAX_ARGS - 1) {
-                argv[argc++] = token;
-                token = strtok(NULL, " ");
+            // 파이프 닫기
+            for (int j = 0; j < n - 1; j++) {
+                close(pipes[j][0]);
+                close(pipes[j][1]);
             }
-            argv[argc] = NULL;
 
-            execvp(argv[0], argv);
-            perror("exec failed");
-            exit(1);
+            // 명령어 파싱
+            if (strncmp(cmds[i], "cd", 2) == 0) {
+                // `cd`는 파이프라인에서 처리할 수 없으므로 별도로 처리
+                fprintf(stderr, "cd: not supported in pipeline\n");
+                exit(1);  // cd 명령어가 파이프라인에서 실행될 수 없음을 알리고 종료
+            } else {
+                // 파이프라인에 포함된 다른 명령어 처리
+                char *argv[MAX_ARGS];
+                int argc = 0;
+                char *token = strtok(cmds[i], " ");
+                while (token && argc < MAX_ARGS - 1) {
+                    argv[argc++] = token;
+                    token = strtok(NULL, " ");
+                }
+                argv[argc] = NULL;
+
+                execvp(argv[0], argv);
+                perror("exec failed");
+                exit(1);
+            }
         } else if (pid > 0) {
             pids[i] = pid;
-            if (prev_fd != -1) close(prev_fd);
-            if (i < n - 1) {
-                close(pipefd[1]);
-                prev_fd = pipefd[0];
-            }
         } else {
             perror("fork");
             exit(1);
         }
     }
 
+    // 부모는 모든 파이프 닫기
+    for (int i = 0; i < n - 1; i++) {
+        close(pipes[i][0]);
+        close(pipes[i][1]);
+    }
+
+    // 배경 실행이 아닌 경우 부모가 자식 프로세스 기다리기
     if (!background) {
         for (int i = 0; i < n; i++) {
             waitpid(pids[i], NULL, 0);
         }
     }
-
-    if (prev_fd != -1) close(prev_fd);
 }
 
 
@@ -310,41 +335,40 @@ int parsing(char *input, ParsedCmd cmds[])
             break;
         }
 
-        char *end = op;
-        *end = '\0';
-        trim(&p);
-        cmds[count].cmd = p;
-
         // check type
-        CmdType next_type;
+        CmdType type;
         if (op[0] == '&' && op[1] == '&')
         {
-            next_type = CMD_AND;
-            p = op + 2;
+            type = CMD_AND;
         }
         else if (op[0] == '|' && op[1] == '|')
         {
-            next_type = CMD_OR;
-            p = op + 2;
+            type = CMD_OR;
         }
         else if (op[0] == '|')
         {
-            next_type = CMD_PIPE;
-            p = op + 1;
+            type = CMD_PIPE;
         }
         else if (op[0] == ';')
         {
-            next_type = CMD_SEQ;
-            p = op + 1;
+            type = CMD_SEQ;
         }
         else
         {
-            next_type = CMD_SIMPLE; // bg
-            p = op + 1;
+            type = CMD_SIMPLE; // bg
         }
 
+        char *end = op;
+        *end = '\0';
         trim(&p);
-        cmds[count++].type = next_type;
+        cmds[count++] = (ParsedCmd){ .cmd = strdup(p), .type = type };
+
+        if (cmds[count - 1].type == CMD_AND || cmds[count - 1].type == CMD_OR)
+        {
+            p = op + 2;
+        } else p = op + 1;
+
+        trim(&p);
     }
 
     return count;
@@ -473,7 +497,7 @@ int cd_cmd (char *input)
         perror("getcwd");
         return 1;
     }
-    free(cwd);
+    //free(cwd);
     cwd = new_cwd;
     return 0;
 }
