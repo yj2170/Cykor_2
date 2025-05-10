@@ -32,6 +32,7 @@ typedef struct
 
 int main();
 void print_prompt();
+int cmpfunc(const void *a, const void *b);
 int ls();
 int cd_cmd(char *input);
 int pwd();
@@ -39,11 +40,14 @@ void trim(char **str);
 void process_line(char *line);
 int parsing(char *input, ParsedCmd cmds[]);
 int execute_cmd(char *cmd);
-void execute_pipeline(char *cmds[], int n, int background);
+int execute_pipeline(char *cmds[], int n, int background);
 
 char *cwd = NULL;
 int seq_cnt;
 ParsedCmd cmds[MAX_SEQ];
+int is_bg = 0;
+int status = 0;
+int wstatus;
 
 int main () 
 {
@@ -146,33 +150,26 @@ int execute_cmd (char *cmd)
         }
         else
         {
-            // parent
-            waitpid(pid, NULL, 0);
-            return 0;
+            waitpid(pid, &wstatus, 0);
+            if (WIFEXITED(wstatus)) {
+                return WEXITSTATUS(wstatus);
+            } else {
+                return 1;
+            }
         }
     }
 }
 
 
 // 전체 process
-void process_line (char *input) {
+void process_line (char *input)
+{
     seq_cnt = parsing(input, cmds); // parsing cmds
     int i = 0;
 
     while (i < seq_cnt)
     {
         ParsedCmd current = cmds[i];
-        int status = 0;
-
-        // BG 
-        int is_bg = 0;
-        char *amp = strrchr(current.cmd, '&');
-        if (amp && *(amp + 1) == '\0')
-        {
-            is_bg = 1;
-            *amp = '\0';
-            trim(&current.cmd);
-        }
 
         // and or 처리
         if (i > 0)
@@ -200,7 +197,7 @@ void process_line (char *input) {
                 pipe_cmds[pipe_cnt++] = cmds[j].cmd;
             }
 
-            execute_pipeline(pipe_cmds, pipe_cnt, 0);
+            status = execute_pipeline(pipe_cmds, pipe_cnt, is_bg);
 
             i = j + 1;
             status = 0;
@@ -227,8 +224,8 @@ void process_line (char *input) {
             }
             else
             {
-                printf("Started process %d in background\n", pid);
-                status = 0;
+                printf("[bg] pid: %d\n", pid);
+                status = 0; // 좀비 프로세스?
             }
         }
         else // 일반
@@ -241,79 +238,88 @@ void process_line (char *input) {
 }
 
 
-void execute_pipeline(char *cmds[], int n, int background) {
-    int pipes[MAX_PIPE][2];
+int execute_pipeline(char *cmds[], int count, int is_bg)
+{
+    int pipefd[2];
+    int prev_fd = -1;
     pid_t pids[MAX_PIPE];
 
-    // 파이프 준비
-    for (int i = 0; i < n - 1; i++) {
-        if (pipe(pipes[i]) < 0) {
-            perror("pipe");
-            exit(1);
+    for (int i = 0; i < count; i++)
+    {
+        if (i < count - 1)
+        {
+            pipe(pipefd);
         }
-    }
 
-    for (int i = 0; i < n; i++) {
         pid_t pid = fork();
-        if (pid == 0) {
-            // 자식 프로세스
-            
-            // 표준 입력
-            if (i > 0) {
-                dup2(pipes[i - 1][0], STDIN_FILENO); // 입력값을 이전 출력값으로 연결
+        if (pid == 0)
+        {
+            if (i > 0)
+            {
+                dup2(prev_fd, 0); // 이전 명령의 출력을 현재 명령의 입력으로
+                close(prev_fd);
             }
 
-            // 표준 출력
-            if (i < n - 1) {
-                dup2(pipes[i][1], STDOUT_FILENO); // 출력값을 다음 입력값으로 연결
+            if (i < count - 1)
+            {
+                dup2(pipefd[1], 1); // 현재 명령의 출력을 pipe로
+                close(pipefd[0]);
+                close(pipefd[1]);
             }
 
-            // 파이프 닫기
-            for (int j = 0; j < n - 1; j++) {
-                close(pipes[j][0]);
-                close(pipes[j][1]);
+            // 명령어 파싱 및 실행
+            char *argv[MAX_ARGS];
+            int argc = 0;
+            char *token = strtok(cmds[i], " ");
+            while (token != NULL && argc < MAX_ARGS - 1)
+            {
+                argv[argc++] = token;
+                token = strtok(NULL, " ");
             }
+            argv[argc] = NULL;
 
-            // 명령어 파싱
-            if (strncmp(cmds[i], "cd", 2) == 0) {
-                // `cd`는 파이프라인에서 처리할 수 없으므로 별도로 처리
-                fprintf(stderr, "cd: not supported in pipeline\n");
-                exit(1);  // cd 명령어가 파이프라인에서 실행될 수 없음을 알리고 종료
-            } else {
-                // 파이프라인에 포함된 다른 명령어 처리
-                char *argv[MAX_ARGS];
-                int argc = 0;
-                char *token = strtok(cmds[i], " ");
-                while (token && argc < MAX_ARGS - 1) {
-                    argv[argc++] = token;
-                    token = strtok(NULL, " ");
-                }
-                argv[argc] = NULL;
-
-                execvp(argv[0], argv);
-                perror("exec failed");
-                exit(1);
-            }
-        } else if (pid > 0) {
-            pids[i] = pid;
-        } else {
-            perror("fork");
+            execvp(argv[0], argv);
+            perror("execvp failed");
             exit(1);
         }
-    }
-
-    // 부모는 모든 파이프 닫기
-    for (int i = 0; i < n - 1; i++) {
-        close(pipes[i][0]);
-        close(pipes[i][1]);
-    }
-
-    // 배경 실행이 아닌 경우 부모가 자식 프로세스 기다리기
-    if (!background) {
-        for (int i = 0; i < n; i++) {
-            waitpid(pids[i], NULL, 0);
+        else if (pid > 0)
+        {
+            pids[i] = pid;
+            if (prev_fd != -1) close(prev_fd);
+            if (i < count - 1)
+            {
+                close(pipefd[1]);
+                prev_fd = pipefd[0];
+            }
+        }
+        else
+        {
+            perror("fork failed");
+            return 1;
         }
     }
+
+    if (!is_bg)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            waitpid(pids[i], &wstatus, 0);
+
+            if (i == count - 1)
+            { // 마지막 명령의 status만 기록
+                if (WIFEXITED(wstatus))
+                {
+                    status = WEXITSTATUS(wstatus);
+                }
+                else
+                {
+                    status = 1;
+                }
+            }
+        }
+    }
+
+    return status;
 }
 
 
@@ -331,7 +337,7 @@ int parsing(char *input, ParsedCmd cmds[])
         // nontype
         if (!op)
         {
-            cmds[count++] = (ParsedCmd){ .cmd = p, .type = CMD_SIMPLE };
+            cmds[count++] = (ParsedCmd){ .cmd = strdup(p), .type = CMD_SIMPLE };
             break;
         }
 
@@ -356,6 +362,7 @@ int parsing(char *input, ParsedCmd cmds[])
         else
         {
             type = CMD_SIMPLE; // bg
+            is_bg = 1;
         }
 
         char *end = op;
@@ -377,6 +384,12 @@ int parsing(char *input, ParsedCmd cmds[])
 
 void print_prompt ()
 {
+    const char *color_reset = "\033[0m";
+    const char *color_user = "\033[1;32m";  // green
+    const char *color_host = "\033[1;34m";  // blue
+    const char *color_dir = "\033[1;36m";   // turquoise
+    const char *color_symbol = "\033[1;33m"; // yellow
+
     // cwd 유효성 검사
     if (cwd == NULL) {
         cwd = getcwd(NULL, 0);
@@ -402,36 +415,77 @@ void print_prompt ()
     char *home_dir = getenv("HOME");
     if (strncmp(cwd, home_dir, strlen(home_dir)) == 0)
     { // home_dir 건너뛰고 출력
-        printf("%s@%s:~%s$ ", username, hostname, cwd + strlen(home_dir));
+        printf("%s%s@%s%s:%s~%s%s$ ", color_user, username, color_host, hostname, color_dir, cwd + strlen(home_dir), color_symbol);
     }
     else
     {
-        printf("%s@%s:%s$ ", username, hostname, cwd);
+        printf("%s%s@%s%s:%s%s%s$ ", color_user, username, color_host, hostname, color_dir, cwd, color_symbol);
     }
+
+    printf("%s", color_reset);
 }
 
 
-int ls ()
-{ // 알파벳 정렬
-    struct dirent *entry;
-    DIR *dp = opendir("."); // 현재 디렉토리 오픈
+int cmpfunc(const void *a, const void *b)
+{
+    const char **str1 = (const char **)a;
+    const char **str2 = (const char **)b;
+    return strcmp(*str1, *str2);
+}
 
+
+int ls()
+{
+    struct dirent *entry;
+    DIR *dp = opendir(".");
     if (dp == NULL)
-    { // 실패 시 에러 출력
+    {
         perror("opendir");
         return 1;
     }
 
-    while ((entry = readdir(dp)) != NULL) // 문서 끝 도달 전까지
+    // 파일 이름들 저장
+    char **files = NULL;
+    int count = 0;
+
+    while ((entry = readdir(dp)) != NULL)
     {
-        // 숨김 파일 출력 x
+        // 숨김 파일 제외
         if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0 && entry->d_name[0] != '.')
         {
-            printf("%s\n", entry->d_name);
+            files = realloc(files, sizeof(char *) * (count + 1));
+            if (files == NULL)
+            {
+                perror("realloc");
+                closedir(dp);
+                return 1;
+            }
+
+            files[count] = strdup(entry->d_name);
+            if (files[count] == NULL)
+            {
+                perror("strdup");
+                closedir(dp);
+                return 1;
+            }
+
+            count++;
         }
     }
 
     closedir(dp);
+
+    qsort(files, count, sizeof(char *), cmpfunc);
+
+    for (int i = 0; i < count; i++)
+    {
+        printf("%s  ", files[i]);
+        free(files[i]);
+    }
+
+    printf("\n");
+
+    free(files);
     return 0;
 }
 
@@ -497,7 +551,8 @@ int cd_cmd (char *input)
         perror("getcwd");
         return 1;
     }
-    //free(cwd);
+
+    free(cwd);
     cwd = new_cwd;
     return 0;
 }
