@@ -8,12 +8,13 @@ int parsing(char *input, ParsedCmd cmds[])
 
     while (*p && count < MAX_SEQ)
     {
+        int bg = 0;
         char *op = strpbrk(p, "&|;");
 
         // nontype
         if (!op)
         {
-            cmds[count++] = (ParsedCmd){ .cmd = strdup(p), .type = CMD_SIMPLE };
+            cmds[count++] = (ParsedCmd){ .cmd = strdup(p), .type = CMD_SIMPLE, .is_bg = bg };
             break;
         }
 
@@ -38,13 +39,13 @@ int parsing(char *input, ParsedCmd cmds[])
         else
         {
             type = CMD_SIMPLE; // bg
-            is_bg = 1;
+            bg = 1;
         }
 
         char *end = op;
         *end = '\0';
         trim(&p);
-        cmds[count++] = (ParsedCmd){ .cmd = strdup(p), .type = type };
+        cmds[count++] = (ParsedCmd){ .cmd = strdup(p), .type = type, .is_bg = bg };
 
         if (cmds[count - 1].type == CMD_AND || cmds[count - 1].type == CMD_OR)
         {

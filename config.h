@@ -9,8 +9,8 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/wait.h>
-#define STDIN_FILENO 0
-#define STDOUT_FILENO 1
+#include <signal.h>
+#include <errno.h>
 
 #define PATH_MAX 4096
 #define MAX_SEQ 16
@@ -30,26 +30,27 @@ typedef struct
 {
     char *cmd;
     CmdType type;
+    int is_bg;
 
 } ParsedCmd;
 
 int main();
 void print_prompt();
+void sigchld_handler(int sig);
+void trim(char **str);
 int cmpfunc(const void *a, const void *b);
 int ls();
 int cd_cmd(char *input);
 int pwd();
-void trim(char **str);
-void process_line(char *line);
 int parsing(char *input, ParsedCmd cmds[]);
+void execute_exec(char *cmd);
+void process_line(char *line);
 int execute_cmd(char *cmd);
-int execute_pipeline(char *cmds[], int n, int background);
+int execute_pipeline(char *cmds[], int n);
 
 extern char *cwd;
 extern int seq_cnt;
 extern ParsedCmd cmds[MAX_SEQ];
-extern int is_bg;
 extern int status;
-extern int wstatus;
 
 #endif

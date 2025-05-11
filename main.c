@@ -3,11 +3,9 @@
 char *cwd = NULL;
 int seq_cnt = 0;
 ParsedCmd cmds[MAX_SEQ] = {0};
-int is_bg = 0;
 int status = 0;
-int wstatus = 0;
 
-int main () 
+int main ()
 {
     char *input = NULL;
     size_t bufsize = 0;
@@ -17,6 +15,16 @@ int main ()
     if (cwd == NULL) {
         // 실패 시 에러 출력
         perror("getcwd");
+        return 1;
+    }
+
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    if (sigaction(SIGCHLD, &sa, NULL) == -1)
+    {
+        perror("sigaction");
         return 1;
     }
 

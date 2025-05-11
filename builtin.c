@@ -61,7 +61,6 @@ int cd_cmd (char *input)
 {
     char *cmd = input + 2;
     trim(&cmd);
-    while(*cmd == ' ') cmd++;
     char path[PATH_MAX];
     char *home_dir = getenv("HOME");
 
@@ -92,7 +91,11 @@ int cd_cmd (char *input)
         }
         else if (cmd[1] == '/')
         {
-            snprintf(path, sizeof(path), "%s%s", home_dir, cmd + 1);
+            if (snprintf(path, sizeof(path), "%s%s", home_dir, cmd + 1) >= sizeof(path))
+            {
+                fprintf(stderr, "cd path too long\n");
+                return 1;
+            }
         }
         else
         {
@@ -110,7 +113,6 @@ int cd_cmd (char *input)
         return 1;
     }
 
-    // cwd 갱신
     char *new_cwd = getcwd(NULL, 0);
     if (new_cwd == NULL)
     {

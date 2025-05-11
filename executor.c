@@ -1,5 +1,29 @@
 #include "config.h"
 
+void execute_exec(char *cmd)
+{
+    char *argv[MAX_ARGS];
+    int argc = 0;
+    char *token = strtok(cmd, " ");
+    
+    while (token != NULL)
+    {
+        if (argc >= MAX_ARGS - 1)
+        {
+            fprintf(stderr, "Too many arguments\n");
+            exit(1);
+        }
+
+        argv[argc++] = token;
+        token = strtok(NULL, " ");
+    }
+
+    argv[argc] = NULL;
+    execvp(argv[0], argv);
+    perror("execvp failed");
+    exit(1);
+}
+
 void process_line (char *input)
 {
     seq_cnt = parsing(input, cmds); // parsing cmds
@@ -35,35 +59,23 @@ void process_line (char *input)
                 pipe_cmds[pipe_cnt++] = cmds[j].cmd;
             }
 
-            status = execute_pipeline(pipe_cmds, pipe_cnt, is_bg);
-
+            status = execute_pipeline(pipe_cmds, pipe_cnt);
             i = j + 1;
-            status = 0;
             continue;
         }
-        else if (is_bg) // case of bg
+        else if (current.is_bg) // case of bg
         {
             pid_t pid = fork();
             if (pid == 0)
             {
                 // child
-                char *argv[MAX_ARGS];
-                int argc = 0;
-                char *token = strtok(current.cmd, " ");
-                while (token != NULL && argc < MAX_ARGS - 1)
-                {
-                    argv[argc++] = token;
-                    token = strtok(NULL, " ");
-                }
-                argv[argc] = NULL;
-                execvp(argv[0], argv);
-                perror("exec failed");
-                exit(1);
+                execute_exec(current.cmd);
             }
             else
             {
+                // parent
                 printf("[bg] pid: %d\n", pid);
-                status = 0; // 좀비 프로세스?
+                status = 0;
             }
         }
         else // 일반
@@ -75,11 +87,11 @@ void process_line (char *input)
     }
 }
 
-int execute_cmd (char *cmd)
+int execute_cmd (char *exeCmd)
 {
-    if (strncmp(cmd, "cd", 2) == 0) return cd_cmd(cmd);
-    else if (strncmp(cmd, "pwd", 3) == 0) return pwd();
-    else if (strncmp(cmd, "ls", 2) == 0) return ls();
+    if (strncmp(exeCmd, "cd", 2) == 0) return cd_cmd(exeCmd);
+    else if (strncmp(exeCmd, "pwd", 3) == 0) return pwd();
+    else if (strncmp(exeCmd, "ls", 2) == 0) return ls();
     else
     {
         // 외부 명령일 경우
@@ -92,23 +104,12 @@ int execute_cmd (char *cmd)
         else if (pid == 0)
         {
             // child
-            char *argv[MAX_ARGS];
-            int argc = 0;
-            char *token = strtok(cmd, " ");
-            while (token != NULL && argc < MAX_ARGS - 1)
-            {
-                argv[argc++] = token;
-                token = strtok(NULL, " ");
-            }
-            argv[argc] = NULL;
-
-            execvp(argv[0], argv);
-            perror("execvp failed");
-            exit(1);
+            execute_exec(exeCmd);
             return 0;
         }
         else
         {
+            int wstatus;
             waitpid(pid, &wstatus, 0);
             if (WIFEXITED(wstatus)) {
                 return WEXITSTATUS(wstatus);
@@ -119,7 +120,7 @@ int execute_cmd (char *cmd)
     }
 }
 
-int execute_pipeline(char *cmds[], int count, int is_bg)
+int execute_pipeline(char *pipeCmds[], int count)
 {
     int pipefd[2];
     int prev_fd = -1;
@@ -127,9 +128,10 @@ int execute_pipeline(char *cmds[], int count, int is_bg)
 
     for (int i = 0; i < count; i++)
     {
-        if (i < count - 1)
+        if (pipe(pipefd) == -1)
         {
-            pipe(pipefd);
+            perror("pipe");
+            exit(1);
         }
 
         pid_t pid = fork();
@@ -148,20 +150,7 @@ int execute_pipeline(char *cmds[], int count, int is_bg)
                 close(pipefd[1]);
             }
 
-            // 명령어 파싱 및 실행
-            char *argv[MAX_ARGS];
-            int argc = 0;
-            char *token = strtok(cmds[i], " ");
-            while (token != NULL && argc < MAX_ARGS - 1)
-            {
-                argv[argc++] = token;
-                token = strtok(NULL, " ");
-            }
-            argv[argc] = NULL;
-
-            execvp(argv[0], argv);
-            perror("execvp failed");
-            exit(1);
+            execute_exec(pipeCmds[i]);
         }
         else if (pid > 0)
         {
@@ -180,22 +169,20 @@ int execute_pipeline(char *cmds[], int count, int is_bg)
         }
     }
 
-    if (!is_bg)
+    for (int i = 0; i < count; i++)
     {
-        for (int i = 0; i < count; i++)
-        {
-            waitpid(pids[i], &wstatus, 0);
+        int wstatus;
+        waitpid(pids[i], &wstatus, 0);
 
-            if (i == count - 1)
-            { // 마지막 명령의 status만 기록
-                if (WIFEXITED(wstatus))
-                {
-                    status = WEXITSTATUS(wstatus);
-                }
-                else
-                {
-                    status = 1;
-                }
+        if (i == count - 1)
+        { // 마지막 명령의 status만 기록
+            if (WIFEXITED(wstatus))
+            {
+                status = WEXITSTATUS(wstatus);
+            }
+            else
+            {
+                status = 1;
             }
         }
     }
